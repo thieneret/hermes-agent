@@ -107,6 +107,7 @@ apps/desktop/**/*.key
 
 # Test suite — not shipped in production images
 tests/
+vendor/hermes-webui/tests/
 
 # Documentation site (Docusaurus)
 website/
