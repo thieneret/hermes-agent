@@ -50,7 +50,13 @@ jobs:
     steps:
       - name: Check out the superproject and its pinned submodule
         env:
-          INPUT_REF: ${{ inputs.ref }}
+          # github.event.inputs.* is the proven-populated dispatch-input form on
+          # this instance; the modern `inputs` context is unproven here and an
+          # empty value would silently fall back to the event ref (on a UI dispatch
+          # that may be the default branch). On push events the input is empty
+          # and github.ref_name is the correct branch, so precedence is:
+          # dispatch input first, event ref second.
+          INPUT_REF: ${{ github.event.inputs.ref }}
           EVENT_REF: ${{ github.ref_name }}
         run: |
           set -eu
@@ -109,7 +115,7 @@ jobs:
       - name: Compute image tags
         id: tags
         env:
-          INPUT_REF: ${{ inputs.ref }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
           EVENT_REF: ${{ github.ref_name }}
         run: |
           set -eu
