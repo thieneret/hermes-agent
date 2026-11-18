@@ -247,7 +247,7 @@ if [ "$needs_chown" = true ]; then
     # Hermes-owned subdirs: recursive chown is safe here because these are
     # created and managed exclusively by hermes (see the s6-setuidgid mkdir
     # -p block below for the canonical list).
-    for sub in cron sessions logs hooks memories skills skins plans workspace home profiles pairing platforms/pairing; do
+    for sub in cron sessions logs hooks memories skills skins plans workspace home profiles pairing platforms/pairing webui; do
         if [ -e "$HERMES_HOME/$sub" ] && tree_has_non_hermes_owner "$HERMES_HOME/$sub"; then
             chown_hermes_tree "$HERMES_HOME/$sub"
         fi
@@ -382,7 +382,8 @@ as_hermes mkdir -p \
     "$HERMES_HOME/workspace" \
     "$HERMES_HOME/home" \
     "$HERMES_HOME/pairing" \
-    "$HERMES_HOME/platforms/pairing"
+    "$HERMES_HOME/platforms/pairing" \
+    "$HERMES_HOME/webui"
 
 # --- XDG_RUNTIME_DIR ---
 # 0700 as dbus requires. It lives in world-writable /tmp under a predictable name
@@ -406,6 +407,50 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
                 echo "[stage2] Warning: could not chown XDG_RUNTIME_DIR $XDG_RUNTIME_DIR (rootless?)"
             chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
         fi
+    fi
+fi
+
+# --- WebUI state directory ---
+# The webui service (docker/s6-rc.d/webui/run) exports HERMES_WEBUI_STATE_DIR
+# defaulting to $HERMES_HOME/webui and runs the server as hermes. The server
+# persists session transcripts (sessions/), settings.json (holds the password
+# hash), auth signing keys and .sessions.json, and WebAuthn/passkey records
+# (passkeys.json + .passkey_challenges.json) inside it — vendor/hermes-webui
+# (api/config.py, api/auth.py, api/passkeys.py) writes those FILES 0600, but it
+# never restricts the DIRECTORY: every state-dir mkdir it performs is plain
+# parents=True/exist_ok=True (server.py start, auth.py key/session writers), so
+# under the ambient umask the directory would land group/world-readable 0755.
+# Tighten it on every boot: hermes-owned, 0700 — the directory itself carries
+# secret-bearing names, same posture as the XDG block above.
+#
+# The default path is seeded by the mkdir -p block above and covered by the
+# subdir chown allowlist there; the block here only re-tightens the directory
+# itself (one stat + chown + chmod, no tree walk — warm boots stay cheap, and
+# no find scan of a potentially large sessions/ tree outside the needs_chown
+# pass). An operator override lands outside both relative-name lists, so honor
+# it here with the XDG block's guarded idiom rather than contorting those
+# lists: refuse symlinked paths, refuse to adopt a foreign-owned directory,
+# create it, and chown ONLY the directory itself. Never recurse into an
+# operator-supplied absolute path: bind-mounted foreign content may live
+# inside it, and a recursive chown there is the #19788 hazard this hook
+# already refuses for $HERMES_HOME. Override values must be absolute paths —
+# the WebUI applies ~ expansion (STATE_DIR .expanduser()), this hook does not.
+webui_state_dir="${HERMES_WEBUI_STATE_DIR:-$HERMES_HOME/webui}"
+webui_owner=""
+if [ -e "$webui_state_dir" ]; then
+    webui_owner=$(stat -c %u "$webui_state_dir" 2>/dev/null || echo unknown)
+fi
+if refuse_symlinked_path "create" "$webui_state_dir"; then
+    :
+elif [ -n "$webui_owner" ] && [ "$webui_owner" != "0" ] && [ "$webui_owner" != "$actual_hermes_uid" ]; then
+    echo "[stage2] Warning: $webui_state_dir is owned by uid $webui_owner (not root or hermes) — refusing to adopt it"
+else
+    mkdir -p "$webui_state_dir" 2>/dev/null || \
+        echo "[stage2] Warning: could not create WebUI state dir $webui_state_dir (continuing)"
+    if [ -d "$webui_state_dir" ]; then
+        chown hermes:hermes "$webui_state_dir" 2>/dev/null || \
+            echo "[stage2] Warning: could not chown WebUI state dir $webui_state_dir (rootless?)"
+        chmod 0700 "$webui_state_dir" 2>/dev/null || true
     fi
 fi
 
