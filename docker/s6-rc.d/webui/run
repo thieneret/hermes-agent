@@ -1,0 +1,50 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# WebUI service. Longrun and always supervised: serving the vendored
+# WebUI from the agent image is the point of the integration, so there
+# is no enable gate (unlike dashboard, which needs HERMES_DASHBOARD).
+# A crash restarts via s6-supervise's default; no finish script is
+# needed because nothing intentionally leaves the slot down.
+#
+# The server runs with the SEALED agent interpreter ($HERMES_PYTHON ->
+# /opt/hermes/.venv/bin/python, Dockerfile ENV) so the WebUI's
+# in-process agent import resolves to this image's /opt/hermes tree:
+#   - HERMES_WEBUI_AGENT_DIR pins the Agent checkout for discovery and
+#     makes managed_agent_startup's activation deterministic. No
+#     re-exec happens here: the agent bootstrap's
+#     venv_sync.prepare_launch() returns None when the tree has no
+#     .git (the image ships /opt/hermes without one; .dockerignore
+#     excludes .git), and auto_install_agent_deps stays opt-in
+#     (HERMES_WEBUI_AUTO_INSTALL), default OFF.
+#   - api/config.py appends the Agent checkout at the END of sys.path,
+#     so third-party names keep resolving to the sealed venv while
+#     agent modules (agent/, tools/, hermes_cli/, ...) come from
+#     /opt/hermes. The WebUI's own directory is sys.path[0] (server.py).
+#
+# Privilege drop mirrors the dashboard/profile-gateways services:
+# skip the drop when already non-root (setgroups() lacks CAP_SETGID),
+# s6-setuidgid otherwise. Mutable state lives under $HERMES_HOME
+# (/opt/data); the install tree stays root-owned and read-only.
+#
+# 015-supervise-perms iterates every static service generically, so
+# hermes keeps s6-svstat/s6-svc access to this slot with no changes.
+
+# with-contenv repopulates HOME from /init as /root. Reset it before
+# dropping privileges so HOME-anchored state lands under /opt/data.
+export HOME=/opt/data
+
+# Every value stays operator-overridable via container env; the
+# dashboard service uses the same ${VAR:-default} shape. Variable
+# names are grep-confirmed in vendor/hermes-webui/api/config.py
+# (HOST/PORT default to 127.0.0.1/8787; the host default must be
+# overridden for Docker port publishing to reach the server).
+export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
+export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
+export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME:-/opt/data}/webui}"
+export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-/opt/hermes}"
+
+cd /opt/data || exit
+
+# Skip the drop when already non-root.
+[ "$(id -u)" = 0 ] || exec "$HERMES_PYTHON" /opt/hermes/vendor/hermes-webui/server.py
+exec s6-setuidgid hermes "$HERMES_PYTHON" /opt/hermes/vendor/hermes-webui/server.py

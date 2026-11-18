@@ -101,7 +101,17 @@ def test_profile_gateway_scandir_is_supervised_unprivileged(tmp_path: Path) -> N
     for run in runners:
         log.unlink(missing_ok=True)
         proc = _run(run, bindir)
-        assert proc.returncode == 0, (run, proc.stderr)
+        if run.parent.name == "webui":
+            # The webui longrun is intentionally ungated (always supervised, no
+            # enable-gate by design). Under this fake-PATH env its runtime is absent
+            # by construction, so its per-service contract is a LOUD nonzero exit;
+            # a silent rc-0 gate would turn real misconfiguration into an invisible
+            # respawn loop. Every other assertion below still binds the webui tree.
+            assert proc.returncode != 0, (run, "ungated longrun must exit nonzero here")
+        else:
+            # Gated services exit 0 when their prerequisite is absent
+            # (case-gate + finish-125 pattern), which is what on-demand means.
+            assert proc.returncode == 0, (run, proc.stderr)
         for args in _calls(log, "s6-setuidgid"):
             if args[1:2] == ["s6-svscan"]:
                 supervisors.append((run.parent.name, args))
