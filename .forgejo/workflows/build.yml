@@ -79,6 +79,16 @@ jobs:
             # as long as upstream never rewrote it (if it did, the pin check
             # below fails the build loudly anyway).
             echo "shallow gitlink fetch failed; fetching FULL submodule history instead" >&2
+            # Self-cleaning: the failed shallow attempt can leave a partially
+            # initialized module (registered url + shallow module gitdir +
+            # worktree) behind. Drop that partial state in this disposable
+            # checkout so the full retry starts from a clean slate: the fresh
+            # full clone fetches only advertised refs, so recovery needs no
+            # by-SHA fetch capability at all (the retry-on-partial-gitdir form
+            # still re-wanted the pin by SHA). Nothing here touches the
+            # superproject gitlink or .gitmodules.
+            git -C src submodule deinit -f vendor/hermes-webui || true
+            rm -rf src/.git/modules/vendor/hermes-webui
             git -C src submodule update --init vendor/hermes-webui
           fi
 
