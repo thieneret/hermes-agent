@@ -1,0 +1,169 @@
+# Builds the agent image (with the vendored WebUI service) and publishes it
+# to the Forgejo container registry on git.kalmhome.top.
+#
+# Clone contract (proven by local bare-repo experiments plus real-remote
+# probes against the actual pinned SHA — see the integration report):
+#   - the superproject is cloned shallow from the GitHub fork at the target ref;
+#   - the submodule is fetched with an exact by-SHA shallow fetch of the
+#     gitlink (proven against GitHub for non-tip reachable commits, and in
+#     local simulation after the upstream tip moved);
+#   - if that fetch ever fails (server policy change), the job falls back to
+#     a FULL submodule history clone, which needs no by-SHA capability;
+#   - git submodule update --remote is never used anywhere in this file: the
+#     .gitmodules branch line is metadata, the gitlink SHA is the only authority;
+#   - both the superproject gitlink and the submodule HEAD must equal the
+#     frozen pin or the build fails before anything is compiled or pushed.
+#
+# Tags: one rolling per-ref tag and one per-commit tag carrying the
+# superproject short SHA. Promotion to `latest` is an explicit operator action;
+# this workflow never touches it.
+name: build-image
+
+on:
+  push:
+    branches:
+      - integration/webui
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Superproject ref (branch) to build
+        required: false
+        default: integration/webui
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Forgejo-specific switch that injects ACTIONS_ID_TOKEN_REQUEST_TOKEN /
+    # ACTIONS_ID_TOKEN_REQUEST_URL so the job can mint an OIDC JWT for the
+    # container registry login. (GitHub tooling flags this key; it is the
+    # documented Forgejo mechanism.)
+    enable-openid-connect: true
+    env:
+      SRC_URL: https://github.com/thieneret/hermes-agent.git
+      REGISTRY: git.kalmhome.top
+      IMAGE: git.kalmhome.top/kalman.imre/hermes-agent
+      # The frozen submodule pin (gitlink in the superproject tree). The ONLY
+      # authority for the submodule checkout; never follow .gitmodules branch.
+      SUBMODULE_PIN: b1935597c0402096c578c5cc3fd627f6ff60e68e
+
+    steps:
+      - name: Check out the superproject and its pinned submodule
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          EVENT_REF: ${{ github.ref_name }}
+        run: |
+          set -eu
+          REF="${INPUT_REF:-$EVENT_REF}"
+          # ref lands in shell and in git args: keep to a conservative charset.
+          case "$REF" in
+            ''|*[!A-Za-z0-9._/-]*)
+              echo "refusing unsafe ref: $REF" >&2
+              exit 1
+              ;;
+          esac
+          echo "checkout ref: $REF"
+          git clone --depth 1 --branch "$REF" "$SRC_URL" src
+          # Primary: the exact gitlink SHA fetched by name, shallow (git's
+          # submodule machinery fetches the pinned SHA itself; proven against
+          # the real remote for non-tip pins and in local simulation after the
+          # upstream tip moved; gitdir stays a few MB).
+          if ! git -C src submodule update --init --depth 1 vendor/hermes-webui; then
+            # Capability-free fallback: full branch history contains the pin
+            # as long as upstream never rewrote it (if it did, the pin check
+            # below fails the build loudly anyway).
+            echo "shallow gitlink fetch failed; fetching FULL submodule history instead" >&2
+            git -C src submodule update --init vendor/hermes-webui
+          fi
+
+      - name: Verify the frozen submodule pin
+        run: |
+          set -eu
+          cd src
+          GITLINK=$(git ls-tree HEAD vendor/hermes-webui | awk '{print $3}')
+          HEAD_SHA=$(git -C vendor/hermes-webui rev-parse HEAD)
+          if [ "$GITLINK" != "$SUBMODULE_PIN" ]; then
+            echo "SUPERPROJECT gitlink $GITLINK != frozen pin $SUBMODULE_PIN — refusing to build" >&2
+            exit 1
+          fi
+          if [ "$HEAD_SHA" != "$SUBMODULE_PIN" ]; then
+            echo "SUBMODULE checkout $HEAD_SHA != frozen pin $SUBMODULE_PIN — refusing to build" >&2
+            exit 1
+          fi
+          echo "pin verified on both sides: $SUBMODULE_PIN"
+
+      - name: Write the build provenance stamp
+        run: |
+          set -eu
+          cd src
+          # Canonical stamp (same script the upstream docker workflow uses).
+          # It records the real superproject commit so the image gets a real
+          # revision in /etc/hermes/image-provenance.json instead of the
+          # all-zero fallback. base-version/distance are intentionally omitted:
+          # with no reachable release tag the commit alone is the identity.
+          python3 scripts/write_install_stamp.py --output install-stamp.json \
+            --commit "$(git rev-parse HEAD)" \
+            --source ci --distribution docker --update-mechanism external
+          cat install-stamp.json
+
+      - name: Compute image tags
+        id: tags
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          EVENT_REF: ${{ github.ref_name }}
+        run: |
+          set -eu
+          REF="${INPUT_REF:-$EVENT_REF}"
+          case "$REF" in
+            ''|*[!A-Za-z0-9._/-]*)
+              echo "refusing unsafe ref: $REF" >&2
+              exit 1
+              ;;
+          esac
+          TAGBASE=$(printf '%s' "$REF" | tr '/' '-')
+          SHA12=$(git -C src rev-parse --short=12 HEAD)
+          FULLSHA=$(git -C src rev-parse HEAD)
+          printf '%s\n' \
+            "base=$TAGBASE" \
+            "sha12=$SHA12" \
+            "fullsha=$FULLSHA" >> "$GITHUB_OUTPUT"
+          echo "tags: $TAGBASE and $TAGBASE-$SHA12"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get the Forgejo OIDC JWT and log in to the container registry
+        run: |
+          set -eu
+          # Request the default-audience ID token (audience omitted: Forgejo
+          # defaults aud to <instance-url>/<repo-owner>). If the registry ever
+          # 401s on this, the operator-proven variant from our other workflow
+          # is an explicit audience: append &audience=u:1:<user-uuid> to the
+          # request URL (same curl shape used for release API calls).
+          JWT=$(
+            curl --fail -s \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL" \
+              | jq -r '.value // empty'
+          )
+          if [ -z "$JWT" ]; then
+            echo "OIDC token request failed (empty value) — cannot log in to $REGISTRY" >&2
+            exit 1
+          fi
+          echo "::add-mask::$JWT"
+          printf '%s' "$JWT" | docker login "$REGISTRY" -u "$ACTOR" --password-stdin
+        env:
+          ACTOR: ${{ github.actor }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: src
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tags.outputs.base }}
+            ${{ env.IMAGE }}:${{ steps.tags.outputs.base }}-${{ steps.tags.outputs.sha12 }}
+          labels: |
+            org.opencontainers.image.title=hermes-agent
+            org.opencontainers.image.source=${{ env.SRC_URL }}
+            org.opencontainers.image.revision=${{ steps.tags.outputs.fullsha }}
