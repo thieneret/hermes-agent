@@ -553,6 +553,11 @@ RUN mkdir -p /opt/data && chmod 0644 /opt/hermes/tools/facts.json && \
 # Build helpers use system Python above; TUI gateway children need the sealed runtime.
 ENV HERMES_PYTHON=/opt/hermes/.venv/bin/python
 VOLUME [ "/opt/data" ]
+# The vendored WebUI service (docker/s6-rc.d/webui/run) listens on 8787 by
+# default. EXPOSE is metadata only — it documents and future-proofs the port
+# for link/inspect tooling; publishing it stays owned by the deployment layer
+# (compose / Traefik), as does TLS termination.
+EXPOSE 8787
 
 # The image ENTRYPOINT is a tiny dispatcher rather than `/init` directly.
 # When the image really owns PID 1 (normal Docker / Podman), the dispatcher
