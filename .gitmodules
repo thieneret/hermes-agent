@@ -1,0 +1,4 @@
+[submodule "vendor/hermes-webui"]
+	path = vendor/hermes-webui
+	url = https://github.com/nesquena/hermes-webui.git
+	branch = master

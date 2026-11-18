@@ -185,7 +185,13 @@ def _jobs(names: list[str], base: str | None, head: str | None,
             argv += ["--head", head] if head else []
             jobs[name] = _Job(argv, root, env)
         elif name == "ruff":
-            jobs[name] = _Job([*resolve_ruff(root), "check", "."], root, env)
+            # --extend-exclude (resolver scope) prunes the vendored submodule tree from
+            # the walk: nested config discovery would otherwise lint vendor files under
+            # the submodule's OWN ruff config, invisible to this repo's ruff.toml exclude
+            # lists. Our commits add no Python files under vendor/, so nothing of ours
+            # loses lint coverage.
+            jobs[name] = _Job([*resolve_ruff(root), "check", "--extend-exclude",
+                               "vendor/hermes-webui/**", "."], root, env)
         else:
             # The ratchet reads both sides from git. It runs from `root` like every other job, so
             # in a snapshot its engine, rules and policy files (profile_scope_patterns.json, the

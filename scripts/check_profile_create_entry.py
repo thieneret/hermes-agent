@@ -15,7 +15,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SKIP_TOP = {"tests", "tests-js", "website", "apps", "ui-tui", "web", "native", "nix"}
+SKIP_TOP = {"tests", "tests-js", "website", "apps", "ui-tui", "web", "native", "nix",
+            "vendor"}  # root-level vendor/: vendored submodule linted upstream; nested vendor trees stay scanned
 SKIP_ANY = {"tests", "node_modules", "__pycache__", "venv"}
 sys.path.append(str(ROOT))
 from hermes_agent.compat.paths import current_path
